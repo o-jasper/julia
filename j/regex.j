@@ -130,3 +130,94 @@ function split(s::String, regex::Regex, include_empty::Bool)
 end
 
 split(s::String, x::String, incl::Bool) = split(s, Regex(strcat("\\Q",x)), incl)
+
+#Ensure something is a regex. (trusting the type calculation)
+ensure_regex(obj::Regex,bool)  = obj
+ensure_regex(obj::String,bool) = Regex(obj,bool)
+
+#TODO i don't like overdocumentation in files, where will this go?
+#Macro that takes a string, regular expressions and variables and
+# fills the variables as such:
+# * String/Regex; skip-to them, 
+#   fills what is between.(match.match is discarded)
+# * Symbol; this is is filled with what is between matches.
+# * Array with Symbol and String/Regex, skip to it, and
+#   fill the variable with the match
+# * TODO possibility for further behavior, but not clear what to do.
+macro regex_var (input_string, vars_and_regex, input_body)
+  matching,string= gensym(2) #Will have to ask why not denote it by itself
+#  @assert vars_and_regex.head == :hcat
+  vars_array= vars_and_regex.args 
+#If it sees the end, it stops, otherwise it continues.
+  function maybe_rv(vars,body) #TODO interim here too
+    if length(vars)>0 
+      return rv(vars[1], nothing, vars[2:],body) 
+    end
+    return body
+  end
+#If it is specified that stuff between needs to be put in a variable, do so.
+  maybe_interim(interim::Nothing, m) = nothing
+  function maybe_interim(interim::Symbol, m) 
+    return quote $interim = $matching ? ($string)[1:($m).offset-1] : nothing end
+  end
+
+# Invalid is not recognized.(More definitions may be added)
+  function rv (first_var, interim, vars, body)
+    error("Invalid input for regex-binding: $first_var 
+type: $(typeof(first_var))") 
+  end
+# Receive a request for capturing interim.
+  function rv (first_var::Symbol, interim, vars, body)
+#    @assert interim == nothing #Only do an interim once.
+    if length(vars) > 1
+      return rv(vars[1], first_var, vars[2:],body)
+    else return quote begin
+      $first_var = ($string)#The remaining string is 'the interim to the end'
+      $body                 # (sounds like a song name)
+    end end
+  end
+#Skipping, possibly capturing interim.
+  function rv(first_var::String, interim, vars, body)
+    m= gensym()
+    return quote
+        $m= $matching ? 
+            match(ensure_regex($first_var,false),$string,start($string)) : 
+            nothing
+        $matching = ($m!=nothing) #&& $matching but that is already so.
+      #Everything else is nothing, but we'll only know at run-time!
+        $(maybe_interim(interim, m))
+        if $matching
+          $string = ($string)[($m).offset + length(($m).match):]
+        end
+        $(maybe_rv(vars,body))
+      end
+    end
+  end
+#Binding.(possibly with interim)
+  function rv(first_var::Expr,interim, vars, body)
+#    @assert first_var.head == :hcat
+    first_var = first_var.args
+#    @assert typeof(first_var[1]) <: Symbol #Stick to form, for it may expand.
+#    @assert typeof(first_var[2]) <: String || first_var[2] <: Regex 
+#    @assert length(first_var) == 2
+    m= gensym()
+    return quote
+      $m= $matching ? 
+          match(ensure_regex($first_var[2],false),$string,start($string)) :
+          nothing
+      $matching = ($m!=nothing) #&& $matching but that is already so.
+      $(maybe_interim(interim, m))
+      $(first_var[1]) = ($m).match # Capture match 
+      if $matching
+        $string = ($string)[($m).offset + length(($m).match):]
+      end
+      $(maybe_rv(vars,body))
+    end
+  end
+#And actually do the work.
+  return quote
+    $matching = true #Start out matching, stop at first mismatch.
+    $string= $input_string
+    $(rv(vars_array[1], nothing, vars_array[2:],input_body))
+  end
+end
